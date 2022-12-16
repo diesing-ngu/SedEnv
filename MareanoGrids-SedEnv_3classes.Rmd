@@ -7,14 +7,14 @@ output:
 
 # Introduction
 
-The sedimentary environment (sedimentasjonsmiljø) is spatially predicted based on observations (response variable) and predictor variables using random forest. 
+The sedimentary environment (sedimentasjonsmiljø) is spatially predicted based on a response variable and predictor variables using random forest. The response variable is derived from detailed maps of the sedimentary environment developed under the MAREANO programme. These map are down-sampled to the resolution of the predictor variables and their legend is simplified from six to three classes.
 
 # Preparations
 
 
 ## Install packages
 
-```{r packages}
+```{r packages, message=FALSE, warning=FALSE}
 library(rgdal)
 library(raster)
 library(sdmpredictors)
@@ -43,7 +43,8 @@ library(dplyr)
 ## Define projection and resolution
 
 Projection based on https://projectionwizard.org/ using the AoI.
-Is it possible to automate the selection of the CSR based on the AoI?
+
+*Is it possible to automate the selection of the CSR based on the AoI?*
 
 ```{r projection}
 crs <- "+proj=laea +lat_0=90 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs" 
@@ -62,11 +63,10 @@ AoI <- readOGR(dsn = "input", layer = "AoI")
 
 # Predictor variables
 
-A raster stack with potentially relevant predictor variables is loaded. This is supplemented with predicted mud content.
+A raster stack with potentially relevant predictor variables is loaded.
 
 ```{r load_predictors}
 predictors <- stack("input/predictors_ngb.grd")
-#GrainSize <- stack(list.files(path="N:/Prosjekter/311700_MAREANO/311778_Automatisert_kartlegging/Kor#nstørrelse/R/GrainSize/output", pattern="GrainSizeReg_folk7_probabilities", full.names= TRUE))
 ```
 
 
@@ -82,10 +82,6 @@ if (crs(AoI, asText=T) != crs) {
 if (crs(predictors, asText=T) != crs) {
   predictors <- projectRaster(predictors, crs = crs, res = res)
 }
-
-#if (crs(GrainSize, asText=T) != crs) {
-#  GrainSize <- projectRaster(GrainSize, crs = crs, res = res)
-#}
 ```
 
 
@@ -94,15 +90,6 @@ if (crs(predictors, asText=T) != crs) {
 ```{r crop_predictors}
 predictors <- mask(crop(predictors, AoI), AoI)
 plot(predictors)
-```
-
-
-## Combine predictors and GrainSize
-
-```{r}
-#predictors <- stack(predictors, GrainSize)
-#names(predictors)[c(38:44)] <- c("M", "sM", "mS", "S", "Cs", "Mx", "RB")
-#names(predictors)
 ```
 
 
@@ -192,7 +179,7 @@ summary(rm_resp)
 ```
 
 
-# Predictor variable selection
+# Predictor variable pre-selection
 
 ## Boruta algorithm
 
@@ -210,17 +197,23 @@ plot(B, las=2, colCode = c("greenyellow", "yellow2", "red3", "cadetblue"), xlab 
 
 To reduce redundancy in information, a de-correlation analysis is carried out. Of those predictor variables identified as important in the Boruta analysis, only those with a correlation coefficient below a set threshold are retained. However, a universally applicable threshold does not exist. Additionally, multicollinearity, i.e., collinearity between three or more variables, might exist in the data. Variance inflation factors (VIFs) are therefore additionally calculated to check for multicollinearity. As a rule of thumb, VIFs larger than 5 or 10 indicate a problematic amount of collinearity (James et al., 2017: pp. 101-102; doi: 10.1080/24754269.2021.1980261). According to Johnston et al. (2017; doi: 10.1007/s11135-017-0584-6) a VIF of 2.5 or greater is generally considered indicative of considerable collinearity.
 
-*NB! This step is iterative. Change the threshold value (th) until VIF is below 2.5.*
-
 ```{r de-corr, message=FALSE, warning=FALSE}
-cor_result<- vifcor(rm_resp[rownames(subset(attStats(B), decision == "Confirmed"))], th = 0.53, maxobservations = nrow(rm_resp))
+th <- 1
+
+repeat{
+ cor_result<- vifcor(rm_resp[rownames(subset(attStats(B), decision == "Confirmed"))], th = th,  maxobservations = nrow(rm_resp))
+ if (max(cor_result@results[,2]) >= 2.5){
+   th <- th - 0.01
+ } else {
+   break
+ }
+}
+
 max(cor_result@results[,2])
 cor_result
 
+
 sel_preds <- cor_result@results$Variables
-
-#sel_preds <- sel_preds[-8] #Removing SICmin manually, the least important predictor
-
 seldata <- rm_resp[c(resp_type, sel_preds)]
 ```
 
@@ -313,8 +306,22 @@ dist_env <- plot_geodist(st_as_sf(resp), predictors,
                      variables = sel_preds,
                      showPlot = FALSE)
 
+dist_env$plot
 dist_env$plot + scale_x_log10()
 ```
+
+
+## Distances in geographic space
+
+```{r geogr_space_dist}
+dist_geogr <- plot_geodist(st_as_sf(resp), predictors,
+                     type = "geo",
+                     unit="km",
+                     showPlot = FALSE)
+
+dist_geogr$plot + scale_x_log10() + scale_y_sqrt()
+```
+
 
 
 # Random Forest model
@@ -333,7 +340,7 @@ rf
 
 The response data are likely spatially structured. Spatial autocorrelation might lead to over-optimistic estimates of performance metrics. To account for spatial autocorrelation, a k-fold cross-validation approach is taken.
 
-First, the buffer size is determined by estimating the spatial autocorrelation range of the individual classes. To achieve this, the classes are transformed to presences-absence data.The median or maximum range of the fitted variogram models is taken as the spatial autocorrelation range, which will be used to determine block size.
+First, the spatial autocorrelation range of the individual classes is determined. To achieve this, the classes are transformed to presences-absence data.The median or maximum range of the fitted variogram models is taken as the spatial autocorrelation range, which will be used to determine block size.
 
 
 ## Creating presence-absence data
@@ -382,10 +389,14 @@ sar <- median(c(v1$var_model$range[2], v5$var_model$range[2], v6$var_model$range
 
 Spatial blocks and folds are created. The folds will be used in a spatial k-fold cross validation. The size of the blocks is determined by the spatial autocorrelation range.
 
+Roberts et. al. (2017) suggest that blocks should be substantially bigger than the range of spatial autocorrelation (in model residual) to obtain realistic error estimates, while a buffer with the size of the spatial autocorrelation range would result in a good estimation of error.
+
+*Should we increase the block size? This could be gauged by looking at the geographic distances plot below. The block size might be right, when sample-to-prediction and CV distances look similar.*
+
 ```{r spatial_blocks}
 spBlocks <- spatialBlock(resp, 
                          rasterLayer = predictors[[1]], 
-                         theRange = sar, 
+                         theRange = sar*2, 
                          k = 10,
                          seed = 42,
                          progress = FALSE)
@@ -394,40 +405,84 @@ spBlocks <- spatialBlock(resp,
 ```
 
 
-## Model tuning
+## Reshaping index
 
-A Random Forest model is tuned. Various values of the mtry parameter are tested in a spatial k-fold cross validation.
+The output from the blocking step needs to be reshaped.
 
-```{r model_tuning}
-# Initially, the output from the previous step needs to be reshaped
+```{r reshape_index}
 index <- list()
 for (n in 1:spBlocks$k) {
   f <- spBlocks[["folds"]][[n]][[-2]]
   index[[length(index)+1]] <- f
 }
+```
 
 
+## Distances in geographic space including CV distances
+
+```{r geogr_space_dist2}
+dist_geogr2 <- plot_geodist(st_as_sf(resp), predictors,
+                     cvfolds= index,
+                     type = "geo",
+                     unit="km",
+                     showPlot = FALSE)
+
+dist_geogr2$plot + scale_x_log10() + ylim(0,2)
+```
+
+
+
+## Model tuning
+
+A Random Forest model is tuned. Predictor variables are finally selected in a forward feature selection approach and various values of the mtry parameter are tested in a spatial k-fold cross validation.
+
+This step is time-consuming and memory-heavy. Therefore, only a subset of possible mtry values is tested. These are multiples of the default mtry values or the default values. 
+
+The maximum number of iterations can be calculated upfront, based on the number of pre-selected predictors:
+
+```{r max_iter}
+factorial(length(sel_preds))/(factorial(2)*factorial(length(sel_preds)-2)) + sum(c((length(sel_preds)-2):1))
+```
+
+
+### Forward feature selection
+
+The best combination of predictor variables (features) is found in a forward feature selection process.
+
+```{r model_tuning}
 nCores <- detectCores()
 cl <- makePSOCKcluster(nCores - 1)
 registerDoParallel(cl)
 
 set.seed(42)
 
-model <- train(seldata[sel_preds],
-               seldata[[1]],
+model <- ffs(seldata[sel_preds],
+               seldata$SedEnv,
                method="rf",
                replace = FALSE,
-               importance=TRUE,
-               tuneGrid = expand.grid(mtry =  c(2:length(sel_preds))),
-               trControl = trainControl(method="CV", 
+               importance = TRUE,
+               #tuneGrid = expand.grid(mtry =  round(floor(sqrt(length(sel_preds)))*c(1,1.5,2,3))),
+               trControl = trainControl(method="CV",
                                         number = 10,
                                         savePredictions = "final",
                                         index = index, 
-                                        allowParallel = TRUE))
+                                        allowParallel = TRUE),
+               verbose = TRUE)
 
 stopCluster(cl)
 
 model
+
+sel_preds <- model$selectedvars
+```
+
+
+### FFS plot
+
+Plot of R2 over the model runs.
+
+```{r ffs_plot}
+plot_ffs(model)
 ```
 
 
@@ -537,7 +592,7 @@ summary(resp_aoa$AOA@data@values)
 aoa_poly <- rasterToPolygons(resp_aoa$AOA, dissolve = TRUE)
 plot(aoa_poly)
 
-writeOGR(aoa_poly, dsn = "output", layer = paste0(resp_type, "3_AOA"), driver = "ESRI Shapefile")
+writeOGR(aoa_poly, dsn = "output", layer = paste0(resp_type, "3_AOA_", Sys.Date()), driver = "ESRI Shapefile")
 ```
 
 
@@ -547,11 +602,11 @@ writeOGR(aoa_poly, dsn = "output", layer = paste0(resp_type, "3_AOA"), driver = 
 The results are exported as GeoTiffs for further analysis.
 
 ```{r export_rasters}
-writeRaster(rfres, paste0("output/", resp_type, "3_classes.tif"))
-writeRaster(rfprob, paste0("output/", resp_type, "3_probabilities.tif"), bylayer=TRUE, suffix=model$levels)
-writeRaster(max_prob, paste0("output/", resp_type, "3_max_probabilities.tif"))
-writeRaster(resp_aoa$DI, paste0("output/", resp_type, "3_DI.tif"))
-writeRaster(resp_aoa$AOA, paste0("output/", resp_type, "3_AOA.tif"))
+writeRaster(rfres, paste0("output/", resp_type, "3_classes", Sys.Date(), ".tif"))
+writeRaster(rfprob, paste0("output/", resp_type, "3_probabilities", Sys.Date(), ".tif"), bylayer=TRUE, suffix=model$levels)
+writeRaster(max_prob, paste0("output/", resp_type, "3_max_probabilities", Sys.Date(), ".tif"))
+writeRaster(resp_aoa$DI, paste0("output/", resp_type, "3_DI", Sys.Date(),".tif"))
+writeRaster(resp_aoa$AOA, paste0("output/", resp_type, "3_AOA", Sys.Date(), ".tif"))
 ```
 
 
