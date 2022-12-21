@@ -33,7 +33,6 @@ library(automap)
 library(gstat)
 library(foreach)
 library(doParallel)
-#library(ModelMetrics)
 library(measures)
 library(forcats)
 library(dplyr)
@@ -316,7 +315,7 @@ dist_env$plot + scale_x_log10()
 ```{r geogr_space_dist}
 dist_geogr <- plot_geodist(st_as_sf(resp), predictors,
                      type = "geo",
-                     unit="km",
+                     #unit="km", # CAST version >= 0.7.0 required
                      showPlot = FALSE)
 
 dist_geogr$plot + scale_x_log10() + scale_y_sqrt()
@@ -394,9 +393,11 @@ Roberts et. al. (2017) suggest that blocks should be substantially bigger than t
 *Should we increase the block size? This could be gauged by looking at the geographic distances plot below. The block size might be right, when sample-to-prediction and CV distances look similar.*
 
 ```{r spatial_blocks}
+m <- 2 # Multiplier applied to block size
+
 spBlocks <- spatialBlock(resp, 
                          rasterLayer = predictors[[1]], 
-                         theRange = sar*2, 
+                         theRange = sar * m, 
                          k = 10,
                          seed = 42,
                          progress = FALSE)
@@ -424,12 +425,11 @@ for (n in 1:spBlocks$k) {
 dist_geogr2 <- plot_geodist(st_as_sf(resp), predictors,
                      cvfolds= index,
                      type = "geo",
-                     unit="km",
+                     #unit="km", # CAST version >= 0.7.0 required
                      showPlot = FALSE)
 
 dist_geogr2$plot + scale_x_log10() + ylim(0,2)
 ```
-
 
 
 ## Model tuning
@@ -479,7 +479,7 @@ sel_preds <- model$selectedvars
 
 ### FFS plot
 
-Plot of R2 over the model runs.
+Plot of Accuracy over the model runs.
 
 ```{r ffs_plot}
 plot_ffs(model)
@@ -524,7 +524,21 @@ RF also provides a relative estimate of predictor variable importance. This is m
 type = 1: mean decrease in accuracy, scale = FALSE: unscaled
 
 ```{r variable_importance}
-plot(varImp(model, scale = F), col = "black")
+plot(varImp(model, scale = FALSE), col = "black")
+```
+
+
+## Distances in environmental space including CV distances
+
+```{r env_space_dist2}
+dist_env2 <- plot_geodist(st_as_sf(resp), predictors,
+                     type = "feature",
+                     cvfolds= index,
+                     variables = sel_preds,
+                     showPlot = FALSE)
+
+dist_env2$plot
+dist_env2$plot + scale_x_log10()
 ```
 
 
@@ -535,7 +549,7 @@ The probabilities of individual classes are predicted. Then, maximum probabiliti
 ### Predicted probabilities
 
 ```{r probabilities}
-rfprob <- predict(predictors[[sel_preds]], model, type="prob", index = model$levels)
+rfprob <- predict(predictors[[sel_preds]], model$finalModel, type="prob", index = model$levels)
 names(rfprob) <- model$levels
 rfprob
 plot(rfprob)
@@ -554,7 +568,7 @@ plot(max_prob)
 ### Predicted classes
 
 ```{r classes}
-rfres <- predict(predictors[[sel_preds]], model)
+rfres <- predict(predictors[[sel_preds]], model$finalModel)
 rfres
 plot(rfres)
 ```
@@ -565,10 +579,19 @@ plot(rfres)
 The area of applicability of the model is determined.
 
 ```{r aoa_resp}
+resp_trainDI <- trainDI(model = model,
+                        variables = sel_preds)
+print(resp_trainDI)
+
 cl <- makeCluster(nCores - 1)
 registerDoParallel(cl)
 
-resp_aoa <- aoa(predictors[[sel_preds]], model, cl = cl)
+resp_aoa <- aoa(newdata = predictors, 
+                model = model,
+                trainDI = resp_trainDI,
+                variables = sel_preds,
+                cl = cl
+                )
 
 stopCluster(cl)
 
@@ -582,7 +605,7 @@ plot(resp_aoa)
 ```{r plot_aoa}
 plot(resp_aoa$DI, main = "Dissimilarity index")
 plot(resp_aoa$AOA, main = "Area of applicability")
-summary(resp_aoa$AOA@data@values)
+paste0("AOA = ", round(cellStats(resp_aoa$AOA, stat = "mean"), 2))
 ```
 
 
@@ -594,7 +617,6 @@ plot(aoa_poly)
 
 writeOGR(aoa_poly, dsn = "output", layer = paste0(resp_type, "3_AOA_", Sys.Date()), driver = "ESRI Shapefile")
 ```
-
 
 
 ## Export Rasters
