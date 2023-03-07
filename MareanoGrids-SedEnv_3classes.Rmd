@@ -14,8 +14,10 @@ The sedimentary environment (sedimentasjonsmiljø) is spatially predicted based 
 
 ## Install packages
 
-```{r packages, message=FALSE, warning=FALSE}
-library(rgdal)
+```{r packages, message=FALSE}
+rm(list=ls())
+
+library(terra)
 library(raster)
 library(sdmpredictors)
 library(spatialEco)
@@ -56,7 +58,7 @@ res <- 4000
 Define the area of interest either by bounding coordinates or by loading a shapefile.
 
 ```{r aoi}
-AoI <- readOGR(dsn = "input", layer = "AoI")
+AoI <- read_sf(dsn = "input", layer = "AoI_Harris")
 ```
 
 
@@ -65,7 +67,10 @@ AoI <- readOGR(dsn = "input", layer = "AoI")
 A raster stack with potentially relevant predictor variables is loaded.
 
 ```{r load_predictors}
-predictors <- stack("input/predictors_ngb.grd")
+predictors <- rast("input/predictors_ngb.tif")
+mud <- extend(rast("N:/Prosjekter/311700_MAREANO/311778_Automatisert_kartlegging/Kornstørrelse/R/GSM_model/output/mud_2023-03-06.tif"), predictors)
+predictors <- c(predictors, mud)
+names(predictors)[38] <- "MUD"
 ```
 
 
@@ -74,13 +79,21 @@ predictors <- stack("input/predictors_ngb.grd")
 Check if AoI and predictors have the defined projection. Re-project if this is not the case.
 
 ```{r uniform_proj}
-if (crs(AoI, asText=T) != crs) {
-  AoI <- spTransform(AoI, crs)
+if (st_crs(AoI)$proj4string != crs) {
+  AoI <- st_transform(AoI, crs)
 }
 
-if (crs(predictors, asText=T) != crs) {
-  predictors <- projectRaster(predictors, crs = crs, res = res)
+if (crs(predictors) != crs) {
+  predictors <- project(predictors, crs, res = res)
 }
+```
+
+
+## Limit to predictors that are relevant for mapping the sedimentary environment
+
+```{r limit_predictors}
+predictors <- predictors[[-c(12,13,14,15,34,35,36,37)]]
+names(predictors)
 ```
 
 
@@ -99,13 +112,12 @@ Create an unprojected spatial polygon giving the minimum extent of all predictor
 ```{r min_extent}
 min_ext <- sum(predictors)
 min_ext[min_ext > 0] <- 1
-min_ext <- rasterToPolygons(min_ext, dissolve = TRUE)
-min_ext <- spTransform(min_ext, CRSobj = "+proj=longlat +datum=WGS84 +no_defs")
+min_ext <- as.polygons(min_ext, dissolve = TRUE)
+min_ext <- project(min_ext, "+proj=longlat +datum=WGS84 +no_defs")
 ```
 
 
 # Response variable
-
 
 ## Type of response?
 
@@ -119,7 +131,7 @@ resp_type <- "SedEnv"
 ## Load response
 
 ```{r load_response}
-resp <- readOGR(dsn = "input", layer = "SedEnv_4km_MaxCombArea_point")
+resp <- read_sf(dsn = "input", layer = "SedEnv_4km_MaxCombArea_point")
 names(resp)[2] <- resp_type
 resp$SedEnv <- as.factor(resp$SedEnv)
 summary(resp)
@@ -138,11 +150,13 @@ Code | Sedimentasjonsmiljø (original)           | Sedimentasjonsmiljø (forenkl
 7    | Ingen/sakte avsetning                    | Ingen/sakte avsetning (7)
 
 ```{r simplify_response}
+resp <- as.data.frame(resp)
 for (n in 1:nrow(resp)) {
-  if(resp@data[n,2] == 2) {resp@data[n,2] <- 1
-  } else if(resp@data[n,2] == 3|resp@data[n,2] == 4) {resp@data[n,2] <- 5
+  if(resp[n,2] == 2) {resp[n,2] <- 1
+  } else if(resp[n,2] == 3|resp[n,2] == 4) {resp[n,2] <- 5
   }
 }
+resp <- st_as_sf(resp)
 summary(resp)
 ```
 
@@ -150,7 +164,7 @@ summary(resp)
 ## Clip to minimum extent
 
 ```{r clip_response}
-resp <- crop(resp, min_ext)
+resp <- st_intersection(resp, st_as_sf(min_ext))
 ```
 
 
@@ -158,11 +172,11 @@ resp <- crop(resp, min_ext)
 
 Reproject to the previously defined projection.
 
-```{r reproject}
-resp <- spTransform(resp, CRSobj = crs)
+```{r reproject, warning=FALSE}
+resp <- st_transform(resp, crs)
 
-plot(AoI)
-plot(resp, pch = 20, cex = 0.75, col = "cornflowerblue", add = TRUE)
+plot(predictors$BATH)
+plot(resp, pch = 20, cex = 0.75, col = "black", add = TRUE)
 ```
 
 
@@ -172,7 +186,9 @@ A regression matrix is created by extracting values of the predictor variables a
 
 ```{r regression matrix}
 ov_resp <- as.data.frame(extract(predictors, resp))
-rm_resp <- cbind(resp@data[2], ov_resp)
+rm_resp <- cbind(resp$SedEnv, ov_resp)
+names(rm_resp)[1] <- "SedEnv"
+rm_resp <- rm_resp[-2]
 rm_resp$SedEnv <- droplevels(rm_resp$SedEnv)
 summary(rm_resp)
 ```
@@ -269,13 +285,13 @@ A visual check to what extent the samples cover the environmental space. This is
 * Grey: Environmental data (based on random subsample)
 
 ```{r}
-smp <- as.data.frame(sampleRandom(x = predictors[[sel_preds[! sel_preds %in% "Obs_depth"]]], size = 10000))
+smp <- as.data.frame(spatSample(x = predictors[[sel_preds]], size = nrow((rm_resp)), method = "random", na.rm = TRUE))
 
-for (i in sel_preds[! sel_preds %in% "Obs_depth"]) {
+for (i in sel_preds) {
     
   print(ggplot() +
-          geom_density(data = seldata, aes(x=seldata[,i]),colour="cornflowerblue",fill="cornflowerblue", alpha=0.1,size=1) +
-          geom_density(data = smp, aes(x=smp[,i]), colour="grey",fill="grey", alpha=0.1, size=1) +
+          geom_density(data = seldata, aes(x=seldata[,i]),colour="cornflowerblue",fill="cornflowerblue", alpha=0.1,linewidth=1) +
+          geom_density(data = smp, aes(x=smp[,i]), colour="grey",fill="grey", alpha=0.1, linewidth=1) +
           scale_x_continuous(name = names(seldata[i])))
         
 }
@@ -289,9 +305,10 @@ for (i in sel_preds[! sel_preds %in% "Obs_depth"]) {
 for (i in sel_preds[2:length(sel_preds)]) {
   
   print(ggplot() +
-    geom_point(data = smp, aes(x=smp[,i], y=BATH), colour="grey", alpha=1, size=2) +
-    geom_point(data = seldata, aes(x=seldata[,i], y=BATH),colour="cornflowerblue", alpha=1, size=2) +
+    geom_point(data = smp, aes(x=smp[,i], y=seldata[,2]), colour="grey", alpha=1, size=2) +
+    geom_point(data = seldata, aes(x=seldata[,i], y=seldata[,2]),colour="cornflowerblue", alpha=1, size=2) +
     scale_x_continuous(name = names(seldata[i])) +
+    ylab(sel_preds[1]) +
     theme_bw())
 }
 ```
@@ -300,7 +317,7 @@ for (i in sel_preds[2:length(sel_preds)]) {
 ## Distances in environmental space 
 
 ```{r env_space_dist}
-dist_env <- plot_geodist(st_as_sf(resp), predictors,
+dist_env <- plot_geodist(resp, predictors,
                      type = "feature",
                      variables = sel_preds,
                      showPlot = FALSE)
@@ -313,10 +330,11 @@ dist_env$plot + scale_x_log10()
 ## Distances in geographic space
 
 ```{r geogr_space_dist}
-dist_geogr <- plot_geodist(st_as_sf(resp), predictors,
+dist_geogr <- plot_geodist(resp, predictors,
                      type = "geo",
-                     #unit="km", # CAST version >= 0.7.0 required
+                     unit="km", # CAST version >= 0.7.0 required
                      showPlot = FALSE)
+
 
 dist_geogr$plot + scale_x_log10() + scale_y_sqrt()
 ```
@@ -349,13 +367,14 @@ resp$C1 <- 0
 resp$C5 <- 0
 resp$C7 <- 0
 
+resp <- as.data.frame(resp)
 for (n in 1:nrow(resp)) {
-  if (resp@data[n,2] == "1") {resp@data[n,3] <- 1}
-  if (resp@data[n,2] == "5") {resp@data[n,4] <- 1}
-  if (resp@data[n,2] == "7") {resp@data[n,5] <- 1}
+  if (resp[n,2] == "1") {resp[n,5] <- 1}
+  if (resp[n,2] == "5") {resp[n,6] <- 1}
+  if (resp[n,2] == "7") {resp[n,7] <- 1}
 }
-
-summary(resp@data)
+resp <- st_as_sf(resp)
+summary(resp)
 ```
 
 
@@ -365,15 +384,15 @@ The spatial dependence structure in the raw data is determined. Specifically, th
 
 ```{r spatial_autocorrelation_range}
 #Class 1 (Avsetning fra suspensjon)
-v1 <- autofitVariogram(C1 ~ 1, resp)
+v1 <- autofitVariogram(C1 ~ 1, as(resp, "Spatial"))
 plot(v1)
 
 #Class 5 (Erosjon/transport)
-v5 <- autofitVariogram(C5 ~ 1, resp)
+v5 <- autofitVariogram(C5 ~ 1, as(resp, "Spatial"))
 plot(v5)
 
 #Class 7 (Ingen/sakte avsetning)
-v6 <- autofitVariogram(C7 ~ 1, resp)
+v6 <- autofitVariogram(C7 ~ 1, as(resp, "Spatial"))
 plot(v6)
 
 sar <- median(c(v1$var_model$range[2], v5$var_model$range[2], v6$var_model$range[2]))
@@ -393,16 +412,15 @@ Roberts et. al. (2017) suggest that blocks should be substantially bigger than t
 *Should we increase the block size? This could be gauged by looking at the geographic distances plot below. The block size might be right, when sample-to-prediction and CV distances look similar.*
 
 ```{r spatial_blocks}
-m <- 2 # Multiplier applied to block size
+k <- 10 # Number of folds
+m <- 0.5 # Multiplier applied to block size
 
 spBlocks <- spatialBlock(resp, 
-                         rasterLayer = predictors[[1]], 
+                         rasterLayer = as(predictors[[1]], "Raster"),
                          theRange = sar * m, 
-                         k = 10,
+                         k = k,
                          seed = 42,
                          progress = FALSE)
-
-#writeOGR(spBlocks$blocks, dsn = "output", layer = "spBlocks", driver = "ESRI Shapefile")
 ```
 
 
@@ -422,10 +440,10 @@ for (n in 1:spBlocks$k) {
 ## Distances in geographic space including CV distances
 
 ```{r geogr_space_dist2}
-dist_geogr2 <- plot_geodist(st_as_sf(resp), predictors,
+dist_geogr2 <- plot_geodist(resp, predictors,
                      cvfolds= index,
                      type = "geo",
-                     #unit="km", # CAST version >= 0.7.0 required
+                     unit="km", # CAST version >= 0.7.0 required
                      showPlot = FALSE)
 
 dist_geogr2$plot + scale_x_log10() + ylim(0,2)
@@ -463,7 +481,7 @@ model <- ffs(seldata[sel_preds],
                importance = TRUE,
                #tuneGrid = expand.grid(mtry =  round(floor(sqrt(length(sel_preds)))*c(1,1.5,2,3))),
                trControl = trainControl(method="CV",
-                                        number = 10,
+                                        number = k,
                                         savePredictions = "final",
                                         index = index, 
                                         allowParallel = TRUE),
@@ -531,7 +549,7 @@ plot(varImp(model, scale = FALSE), col = "black")
 ## Distances in environmental space including CV distances
 
 ```{r env_space_dist2}
-dist_env2 <- plot_geodist(st_as_sf(resp), predictors,
+dist_env2 <- plot_geodist(resp, predictors,
                      type = "feature",
                      cvfolds= index,
                      variables = sel_preds,
@@ -549,7 +567,9 @@ The probabilities of individual classes are predicted. Then, maximum probabiliti
 ### Predicted probabilities
 
 ```{r probabilities}
-rfprob <- predict(predictors[[sel_preds]], model$finalModel, type="prob", index = model$levels)
+sel_pred_stack <- stack(predictors[[sel_preds]])
+
+rfprob <- predict(sel_pred_stack, model$finalModel, type="prob", index = model$levels)
 names(rfprob) <- model$levels
 rfprob
 plot(rfprob)
@@ -568,7 +588,7 @@ plot(max_prob)
 ### Predicted classes
 
 ```{r classes}
-rfres <- predict(predictors[[sel_preds]], model$finalModel)
+rfres <- predict(sel_pred_stack, model$finalModel)
 rfres
 plot(rfres)
 ```
@@ -583,17 +603,11 @@ resp_trainDI <- trainDI(model = model,
                         variables = sel_preds)
 print(resp_trainDI)
 
-cl <- makeCluster(nCores - 1)
-registerDoParallel(cl)
-
 resp_aoa <- aoa(newdata = predictors, 
                 model = model,
                 trainDI = resp_trainDI,
-                variables = sel_preds,
-                cl = cl
+                variables = sel_preds
                 )
-
-stopCluster(cl)
 
 plot(resp_aoa)
 ```
@@ -605,17 +619,19 @@ plot(resp_aoa)
 ```{r plot_aoa}
 plot(resp_aoa$DI, main = "Dissimilarity index")
 plot(resp_aoa$AOA, main = "Area of applicability")
-paste0("AOA = ", round(cellStats(resp_aoa$AOA, stat = "mean"), 2))
+
+fr <- freq(resp_aoa$AOA)
+print(paste0("AOA = ", round(100*fr$count[2]/ sum(fr$count),2), "% of pixels"))
 ```
 
 
 ## Convert AOA from raster to polygon
 
 ```{r aoa_poly}
-aoa_poly <- rasterToPolygons(resp_aoa$AOA, dissolve = TRUE)
+aoa_poly <- as.polygons(resp_aoa$AOA, dissolve = TRUE)
 plot(aoa_poly)
 
-writeOGR(aoa_poly, dsn = "output", layer = paste0(resp_type, "3_AOA_", Sys.Date()), driver = "ESRI Shapefile")
+write_sf(st_as_sf(aoa_poly), dsn = "output", layer = paste0(resp_type, "3_AOA_", Sys.Date()), driver = "ESRI Shapefile")
 ```
 
 
@@ -629,6 +645,24 @@ writeRaster(rfprob, paste0("output/", resp_type, "3_probabilities", Sys.Date(), 
 writeRaster(max_prob, paste0("output/", resp_type, "3_max_probabilities", Sys.Date(), ".tif"))
 writeRaster(resp_aoa$DI, paste0("output/", resp_type, "3_DI", Sys.Date(),".tif"))
 writeRaster(resp_aoa$AOA, paste0("output/", resp_type, "3_AOA", Sys.Date(), ".tif"))
+```
+
+
+## Output a log file
+
+```{r log}
+sink(file = paste0("output/ModelLog_", Sys.Date(), ".txt"))
+print("Selected Predictors")
+sel_preds
+model
+print("Final Model")
+acc
+print("Error of commission")
+EoC
+print("Error of omission")
+EoO
+paste0("AOA = ", round(100*fr$count[2]/ sum(fr$count),2), "% of pixels")
+sink()
 ```
 
 
