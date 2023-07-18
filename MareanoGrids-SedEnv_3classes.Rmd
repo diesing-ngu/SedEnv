@@ -7,7 +7,7 @@ output:
 
 # Introduction
 
-The sedimentary environment (sedimentasjonsmiljø) is spatially predicted based on a response variable and predictor variables using random forest. The response variable is derived from detailed maps of the sedimentary environment developed under the MAREANO programme. These map are down-sampled to the resolution of the predictor variables and their legend is simplified from six to three classes.
+The sedimentary environment (sedimentasjonsmiljø) is spatially predicted based on a response variable and predictor variables using random forest. The response variable is derived from detailed maps of the sedimentary environment developed under the MAREANO programme. These maps are down-sampled to the resolution of the predictor variables and their legend is simplified from six to three classes.
 
 # Preparations
 
@@ -32,7 +32,6 @@ library(geosphere)
 library(randomForest)
 library(blockCV)
 library(automap)
-library(gstat)
 library(foreach)
 library(doParallel)
 library(measures)
@@ -55,10 +54,22 @@ res <- 4000
 
 ## Define Area of Interest (AoI)
 
-Define the area of interest either by bounding coordinates or by loading a shapefile.
+The area of interest is defined by the predicted sediment classes. Rocks and boulders (50) define areas outside the AoI.
+
+*Make sure to load the most up-to-date version of predicted sediment classes*
 
 ```{r aoi}
-AoI <- read_sf(dsn = "input", layer = "AoI_Harris")
+AoI <- rast("N:/Prosjekter/311700_MAREANO/311778_Automatisert_kartlegging/Kornstørrelse/R/GrainSize/output/GrainSizeReg_folk8_classes_2023-06-28.tif")
+AoI[AoI == 11] <- 1
+AoI[AoI == 12] <- 1
+AoI[AoI == 13] <- 1
+AoI[AoI == 20] <- 1
+AoI[AoI == 30] <- 1
+AoI[AoI == 40] <- 1
+AoI[AoI == 50] <- NA
+AoI[AoI == 60] <- 1
+
+AoI <- as.polygons(AoI, dissolve = TRUE)
 ```
 
 
@@ -68,9 +79,9 @@ A raster stack with potentially relevant predictor variables is loaded.
 
 ```{r load_predictors}
 predictors <- rast("input/predictors_ngb.tif")
-mud <- extend(rast("N:/Prosjekter/311700_MAREANO/311778_Automatisert_kartlegging/Kornstørrelse/R/GSM_model/output/mud_2023-03-06.tif"), predictors)
+mud <- extend(rast("N:/Prosjekter/311700_MAREANO/311778_Automatisert_kartlegging/Kornstørrelse/R/GSM_model/output/mud_2023-06-30.tif"), predictors)
 predictors <- c(predictors, mud)
-names(predictors)[38] <- "MUD"
+names(predictors)[38] <- "Mud"
 ```
 
 
@@ -107,13 +118,12 @@ plot(predictors)
 
 ## Minimum extent
 
-Create an unprojected spatial polygon giving the minimum extent of all predictors. This will be used to limit the response data to those points for which predictor variable data can be extracted.
+Create a  spatial polygon giving the minimum extent of all predictors. This will be used to limit the response data to those points for which predictor variable data can be extracted.
 
 ```{r min_extent}
 min_ext <- sum(predictors)
 min_ext[min_ext > 0] <- 1
 min_ext <- as.polygons(min_ext, dissolve = TRUE)
-min_ext <- project(min_ext, "+proj=longlat +datum=WGS84 +no_defs")
 ```
 
 
@@ -131,7 +141,7 @@ resp_type <- "SedEnv"
 ## Load response
 
 ```{r load_response}
-resp <- read_sf(dsn = "input", layer = "SedEnv_4km_MaxCombArea_point")
+resp <- read_sf(dsn = "input", layer = "SedEnv_4km_MaxCombArea_point_20230622")
 names(resp)[2] <- resp_type
 resp$SedEnv <- as.factor(resp$SedEnv)
 summary(resp)
@@ -168,15 +178,11 @@ resp <- st_intersection(resp, st_as_sf(min_ext))
 ```
 
 
-## Reproject
+## Plot response on bathymetry
 
-Reproject to the previously defined projection.
-
-```{r reproject, warning=FALSE}
-resp <- st_transform(resp, crs)
-
+```{r plot_resp, warning=FALSE}
 plot(predictors$BATH)
-plot(resp, pch = 20, cex = 0.75, col = "black", add = TRUE)
+plot(resp, pch = 20, cex = 0.5, col = "black", add = TRUE)
 ```
 
 
@@ -185,10 +191,8 @@ plot(resp, pch = 20, cex = 0.75, col = "black", add = TRUE)
 A regression matrix is created by extracting values of the predictor variables at the response data locations.
 
 ```{r regression matrix}
-ov_resp <- as.data.frame(extract(predictors, resp))
-rm_resp <- cbind(resp$SedEnv, ov_resp)
-names(rm_resp)[1] <- "SedEnv"
-rm_resp <- rm_resp[-2]
+rm_resp <- as.data.frame(extract(predictors, resp, bind = TRUE))
+rm_resp <- rm_resp[-c(1,3)]
 rm_resp$SedEnv <- droplevels(rm_resp$SedEnv)
 summary(rm_resp)
 ```
@@ -217,7 +221,7 @@ th <- 1
 
 repeat{
  cor_result<- vifcor(rm_resp[rownames(subset(attStats(B), decision == "Confirmed"))], th = th,  maxobservations = nrow(rm_resp))
- if (max(cor_result@results[,2]) >= 2.5){
+ if (max(cor_result@results[,2]) >= 5){
    th <- th - 0.01
  } else {
    break
@@ -314,25 +318,12 @@ for (i in sel_preds[2:length(sel_preds)]) {
 ```
 
 
-## Distances in environmental space 
-
-```{r env_space_dist}
-dist_env <- plot_geodist(resp, predictors,
-                     type = "feature",
-                     variables = sel_preds,
-                     showPlot = FALSE)
-
-dist_env$plot
-dist_env$plot + scale_x_log10()
-```
-
-
 ## Distances in geographic space
 
 ```{r geogr_space_dist}
 dist_geogr <- plot_geodist(resp, predictors,
                      type = "geo",
-                     unit="km", # CAST version >= 0.7.0 required
+                     unit="km",
                      showPlot = FALSE)
 
 
@@ -384,22 +375,22 @@ The spatial dependence structure in the raw data is determined. Specifically, th
 
 ```{r spatial_autocorrelation_range}
 #Class 1 (Avsetning fra suspensjon)
-v1 <- autofitVariogram(C1 ~ 1, as(resp, "Spatial"))
+v1 <- autofitVariogram(C1 ~ 1, resp)
 plot(v1)
 
 #Class 5 (Erosjon/transport)
-v5 <- autofitVariogram(C5 ~ 1, as(resp, "Spatial"))
+v5 <- autofitVariogram(C5 ~ 1, resp)
 plot(v5)
 
 #Class 7 (Ingen/sakte avsetning)
-v6 <- autofitVariogram(C7 ~ 1, as(resp, "Spatial"))
-plot(v6)
+v7 <- autofitVariogram(C7 ~ 1, resp)
+plot(v7)
 
-sar <- median(c(v1$var_model$range[2], v5$var_model$range[2], v6$var_model$range[2]))
+sar <- median(c(v1$var_model$range[2], v5$var_model$range[2], v7$var_model$range[2]))
 
 #OR
 
-#sar <- max(c(v1$var_model$range[2], v5$var_model$range[2], v6$var_model$range[2]))
+#sar <- max(c(v1$var_model$range[2], v5$var_model$range[2], v7$var_model$range[2]))
 ```
 
 
@@ -413,14 +404,14 @@ Roberts et. al. (2017) suggest that blocks should be substantially bigger than t
 
 ```{r spatial_blocks}
 k <- 10 # Number of folds
-m <- 0.5 # Multiplier applied to block size
+m <- 2 # Multiplier applied to block size
 
-spBlocks <- spatialBlock(resp, 
-                         rasterLayer = as(predictors[[1]], "Raster"),
-                         theRange = sar * m, 
-                         k = k,
-                         seed = 42,
-                         progress = FALSE)
+spBlocks <- cv_spatial(resp,
+                       k = k,
+                       #hexagon = FALSE,
+                       size = sar * m,
+                       seed = 42,
+                       progress = FALSE)
 ```
 
 
@@ -429,10 +420,14 @@ spBlocks <- spatialBlock(resp,
 The output from the blocking step needs to be reshaped.
 
 ```{r reshape_index}
-index <- list()
+# Spatial blocks
+index_train <- list()
+index_val <- list()
 for (n in 1:spBlocks$k) {
-  f <- spBlocks[["folds"]][[n]][[-2]]
-  index[[length(index)+1]] <- f
+  ft <- spBlocks[["folds_list"]][[n]][[-2]]
+  fv <- spBlocks[["folds_list"]][[n]][[2]]
+  index_train[[length(index_train)+1]] <- ft
+  index_val[[length(index_val)+1]] <- fv
 }
 ```
 
@@ -441,11 +436,12 @@ for (n in 1:spBlocks$k) {
 
 ```{r geogr_space_dist2}
 dist_geogr2 <- plot_geodist(resp, predictors,
-                     cvfolds= index,
+                     cvfolds= index_val,
                      type = "geo",
-                     unit="km", # CAST version >= 0.7.0 required
+                     unit="km",
                      showPlot = FALSE)
 
+dist_geogr2$plot + xlim(0,200) + ylim(0,0.05)
 dist_geogr2$plot + scale_x_log10() + ylim(0,2)
 ```
 
@@ -478,12 +474,11 @@ model <- ffs(seldata[sel_preds],
                seldata$SedEnv,
                method="rf",
                replace = FALSE,
-               importance = TRUE,
-               #tuneGrid = expand.grid(mtry =  round(floor(sqrt(length(sel_preds)))*c(1,1.5,2,3))),
-               trControl = trainControl(method="CV",
+               importance=TRUE,
+               trControl = trainControl(method="CV", 
                                         number = k,
                                         savePredictions = "final",
-                                        index = index, 
+                                        index = index_train, 
                                         allowParallel = TRUE),
                verbose = TRUE)
 
@@ -543,20 +538,6 @@ type = 1: mean decrease in accuracy, scale = FALSE: unscaled
 
 ```{r variable_importance}
 plot(varImp(model, scale = FALSE), col = "black")
-```
-
-
-## Distances in environmental space including CV distances
-
-```{r env_space_dist2}
-dist_env2 <- plot_geodist(resp, predictors,
-                     type = "feature",
-                     cvfolds= index,
-                     variables = sel_preds,
-                     showPlot = FALSE)
-
-dist_env2$plot
-dist_env2$plot + scale_x_log10()
 ```
 
 
@@ -641,7 +622,7 @@ The results are exported as GeoTiffs for further analysis.
 
 ```{r export_rasters}
 writeRaster(rfres, paste0("output/", resp_type, "3_classes", Sys.Date(), ".tif"))
-writeRaster(rfprob, paste0("output/", resp_type, "3_probabilities", Sys.Date(), ".tif"), bylayer=TRUE, suffix=model$levels)
+writeRaster(rast(rfprob), paste0("output/", resp_type, "3_probabilities_", Sys.Date(), ".tif"), names = model$levels)
 writeRaster(max_prob, paste0("output/", resp_type, "3_max_probabilities", Sys.Date(), ".tif"))
 writeRaster(resp_aoa$DI, paste0("output/", resp_type, "3_DI", Sys.Date(),".tif"))
 writeRaster(resp_aoa$AOA, paste0("output/", resp_type, "3_AOA", Sys.Date(), ".tif"))
