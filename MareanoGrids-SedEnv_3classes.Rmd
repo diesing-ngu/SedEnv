@@ -59,7 +59,7 @@ The area of interest is defined by the predicted sediment classes. Rocks and bou
 *Make sure to load the most up-to-date version of predicted sediment classes*
 
 ```{r aoi}
-AoI <- rast("N:/Prosjekter/311700_MAREANO/311778_Automatisert_kartlegging/Kornstørrelse/R/GrainSize/output/GrainSizeReg_folk8_classes_2023-06-28.tif")
+AoI <- rast("input/GrainSizeReg_folk8_classes_2023-06-28.tif")
 AoI[AoI == 11] <- 1
 AoI[AoI == 12] <- 1
 AoI[AoI == 13] <- 1
@@ -79,7 +79,7 @@ A raster stack with potentially relevant predictor variables is loaded.
 
 ```{r load_predictors}
 predictors <- rast("input/predictors_ngb.tif")
-mud <- extend(rast("N:/Prosjekter/311700_MAREANO/311778_Automatisert_kartlegging/Kornstørrelse/R/GSM_model/output/mud_2023-06-30.tif"), predictors)
+mud <- extend(rast("input/mud_2023-06-30.tif"), predictors)
 predictors <- c(predictors, mud)
 names(predictors)[38] <- "Mud"
 ```
