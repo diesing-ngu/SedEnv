@@ -40,11 +40,17 @@ library(dplyr)
 ```
 
 
+## Download and unzip input data
+
+```{r input_data}
+download.file(url = "https://zenodo.org/records/10040720/files/SedimentaryEnvironment_input.zip", destfile = "input/input_data.zip")
+unzip(zipfile = "input/input_data.zip", exdir = "input")
+```
+
+
 ## Define projection and resolution
 
 Projection based on https://projectionwizard.org/ using the AoI.
-
-*Is it possible to automate the selection of the CSR based on the AoI?*
 
 ```{r projection}
 crs <- "+proj=laea +lat_0=90 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs" 
@@ -55,8 +61,6 @@ res <- 4000
 ## Define Area of Interest (AoI)
 
 The area of interest is defined by the predicted sediment classes. Rocks and boulders (50) define areas outside the AoI.
-
-*Make sure to load the most up-to-date version of predicted sediment classes*
 
 ```{r aoi}
 AoI <- rast("input/GrainSizeReg_folk8_classes_2023-06-28.tif")
@@ -400,7 +404,7 @@ Spatial blocks and folds are created. The folds will be used in a spatial k-fold
 
 Roberts et. al. (2017) suggest that blocks should be substantially bigger than the range of spatial autocorrelation (in model residual) to obtain realistic error estimates, while a buffer with the size of the spatial autocorrelation range would result in a good estimation of error.
 
-*Should we increase the block size? This could be gauged by looking at the geographic distances plot below. The block size might be right, when sample-to-prediction and CV distances look similar.*
+*Should we modify the block size? This could be gauged by looking at the geographic distances plot below. The block size might be right, when sample-to-prediction and CV distances look similar.*
 
 ```{r spatial_blocks}
 k <- 10 # Number of folds
